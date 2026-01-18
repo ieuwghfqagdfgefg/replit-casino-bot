@@ -164,8 +164,7 @@ class AntariaCasinoBot:
                 logger.error("Invalid ADMIN_IDS format. Use comma-separated numbers.")
         
         # Initialize bot application
-        token = os.environ.get("TELEGRAM_TOKEN")
-        self.app = Application.builder().token(token).build()
+        self.app = Application.builder().token(self.token).build()
         self.app.bot_data['casino_bot'] = self # Store reference for access from handlers if needed
         # Add job queue check
         if not self.app.job_queue:
