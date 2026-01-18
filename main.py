@@ -521,11 +521,11 @@ class AntariaCasinoBot:
         # Remove @ if present
         if identifier.startswith('@'):
             username = identifier[1:]
-            # Search by username
-            for user_data in self.db.data['users'].values():
-                if user_data.get('username', '').lower() == username.lower():
-                    return user_data
-            return None
+            with self.db.app.app_context():
+                from sqlalchemy import select
+                from models import User
+                user = db.session.execute(select(User).filter(User.username.ilike(username))).scalar_one_or_none()
+                return self.db._user_to_dict(user) if user else None
         else:
             # Try to parse as user ID
             try:
@@ -773,10 +773,13 @@ Unclaimed: ${user_data.get('unclaimed_referral_earnings', 0):.2f}
     async def housebal_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show house balance"""
         house_balance = self.db.get_house_balance()
+        ltc_rate = await self.get_live_rate("litecoin")
+        ltc_balance = house_balance / ltc_rate
         
-        housebal_text = f"🏦 House: ${house_balance:.2f}"
+        # Format with bold amount as requested by user using <b> tags for HTML
+        housebal_text = f"💰 Available house balance: <b>${house_balance:,.0f}</b> (<b>{ltc_balance:.2f} LTC</b>)"
         
-        await update.message.reply_text(housebal_text, parse_mode="Markdown")
+        await update.message.reply_text(housebal_text, parse_mode="HTML")
     
     async def history_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show match history"""
@@ -2362,16 +2365,47 @@ Unclaimed: ${user_data.get('unclaimed_referral_earnings', 0):.2f}
         user_data = self.ensure_user_registered(update)
         user_id = update.effective_user.id
         
-        if len(context.args) < 2:
-            await update.message.reply_text("Usage: `/tip <amount> @user`", parse_mode="Markdown")
-            return
+        # Determine recipient and amount
+        recipient_id = None
+        recipient_username = None
+        amount = 0
         
-        try:
-            amount = round(float(context.args[0]), 2)
-        except ValueError:
-            await update.message.reply_text("❌ Invalid amount")
-            return
+        if update.message.reply_to_message:
+            # Handle tip by reply: /tip <amount>
+            if not context.args:
+                await update.message.reply_text("Usage: Reply to a message with `/tip <amount>`", parse_mode="Markdown")
+                return
+            try:
+                # Handle potential float with commas
+                amount_str = context.args[0].replace(',', '')
+                amount = round(float(amount_str), 2)
+            except ValueError:
+                await update.message.reply_text("❌ Invalid amount")
+                return
             
+            recipient_user = update.message.reply_to_message.from_user
+            recipient_id = recipient_user.id
+            recipient_username = recipient_user.username or recipient_user.first_name
+        else:
+            # Handle tip by @username: /tip <amount> @user
+            if len(context.args) < 2:
+                await update.message.reply_text("Usage: `/tip <amount> @user` or reply to a message with `/tip <amount>`", parse_mode="Markdown")
+                return
+            try:
+                amount_str = context.args[0].replace(',', '')
+                amount = round(float(amount_str), 2)
+            except ValueError:
+                await update.message.reply_text("❌ Invalid amount")
+                return
+            
+            identifier = context.args[1]
+            recipient_data = self.find_user_by_username_or_id(identifier)
+            if not recipient_data:
+                await update.message.reply_text(f"❌ Could not find user {identifier}.")
+                return
+            recipient_id = recipient_data['user_id']
+            recipient_username = recipient_data.get('username', identifier)
+
         if amount <= 0.01:
             await update.message.reply_text("❌ Min: $0.01")
             return
@@ -2379,20 +2413,13 @@ Unclaimed: ${user_data.get('unclaimed_referral_earnings', 0):.2f}
         if amount > user_data['balance']:
             await update.message.reply_text(f"❌ Balance: ${user_data['balance']:.2f}")
             return
-
-        recipient_username = context.args[1].lstrip('@')
-        recipient_data = next((u for u in self.db.data['users'].values() if u.get('username') == recipient_username), None)
-
-        if not recipient_data:
-            await update.message.reply_text(f"❌ Could not find user with username @{recipient_username}.")
-            return
             
-        if recipient_data['user_id'] == user_id:
+        if recipient_id == user_id:
             await update.message.reply_text("❌ You cannot tip yourself.")
             return
 
         keyboard = [
-            [InlineKeyboardButton("✅ Confirm", callback_data=f"tip_confirm_{recipient_data['user_id']}_{amount:.2f}"),
+            [InlineKeyboardButton("✅ Confirm", callback_data=f"tip_confirm_{recipient_id}_{amount:.2f}"),
              InlineKeyboardButton("❌ Cancel", callback_data="tip_cancel")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
